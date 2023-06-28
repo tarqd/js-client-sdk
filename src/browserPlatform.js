@@ -22,7 +22,7 @@ export default function makeBrowserPlatform(options) {
   ret.synchronousFlush = false; // this will be set to true by index.js if the page is hidden
 
   // XMLHttpRequest may not exist if we're running in a server-side rendering context
-  if (global.XMLHttpRequest) {
+  if (GLOBAL.XMLHttpRequest) {
     const disableSyncFlush = options && options.disableSyncEventPost;
     ret.httpRequest = (method, url, headers, body) => {
       const syncFlush = ret.synchronousFlush & !disableSyncFlush;
