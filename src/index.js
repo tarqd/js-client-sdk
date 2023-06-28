@@ -11,6 +11,21 @@ const extraOptionDefs = {
   eventUrlTransformer: { type: 'function' },
   disableSyncEventPost: { default: false },
 };
+// window is not defined in node.js or in a web worker
+// self is defined in a service worker
+// global is defined in node.js
+// see https://github.com/tc39/proposal-global#rationale
+const GLOBAL = (function () {
+	// the only reliable means to get the global object is
+	// `Function('return this')()`
+	// However, this causes CSP violations in Chrome apps.
+	if (typeof self !== 'undefined') { return self; }
+	if (typeof window !== 'undefined') { return window; }
+	if (typeof global !== 'undefined') { return global; }
+	throw new Error('unable to locate global object');
+})();
+
+const hasDOM = typeof window !== 'undefined' && typeof document !== 'undefined';
 
 // Pass our platform object to the common code to create the browser version of the client
 export function initialize(env, user, options = {}) {
@@ -29,7 +44,7 @@ export function initialize(env, user, options = {}) {
   });
   client.waitUntilGoalsReady = () => goalsPromise;
 
-  if (validatedOptions.fetchGoals) {
+  if (hasDOM && validatedOptions.fetchGoals) {
     GoalManager(clientVars, () => emitter.emit(goalsEvent));
     // Don't need to save a reference to the GoalManager - its constructor takes care of setting
     // up the necessary event wiring
@@ -37,8 +52,8 @@ export function initialize(env, user, options = {}) {
     emitter.emit(goalsEvent);
   }
 
-  if (document.readyState !== 'complete') {
-    window.addEventListener('load', clientVars.start);
+  if (hasDOM && document.readyState !== 'complete') {
+    GLOBAL.addEventListener('load', clientVars.start);
   } else {
     clientVars.start();
   }
@@ -63,13 +78,15 @@ export function initialize(env, user, options = {}) {
   // This also may provide more opportunity for the events to get flushed.
   //
   const handleVisibilityChange = () => {
+    // only called in environments with a DOM
     if (document.visibilityState === 'hidden') {
       syncFlush();
     }
   };
-
-  document.addEventListener('visibilitychange', handleVisibilityChange);
-  window.addEventListener('pagehide', syncFlush);
+  if(hasDOM) {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', syncFlush);
+  }
 
   return client;
 }

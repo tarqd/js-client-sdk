@@ -1,5 +1,19 @@
 import newHttpRequest from './httpRequest';
 
+// window is not defined in node.js or in a web worker
+// self is defined in a service worker
+// global is defined in node.js
+// see https://github.com/tc39/proposal-global#rationale
+const GLOBAL = (function () {
+	// the only reliable means to get the global object is
+	// `Function('return this')()`
+	// However, this causes CSP violations in Chrome apps.
+	if (typeof self !== 'undefined') { return self; }
+	if (typeof window !== 'undefined') { return window; }
+	if (typeof global !== 'undefined') { return global; }
+	throw new Error('unable to locate global object');
+})();
+
 export default function makeBrowserPlatform(options) {
   const ret = {
     userAgentHeaderName: 'X-LaunchDarkly-User-Agent',
@@ -8,12 +22,29 @@ export default function makeBrowserPlatform(options) {
   ret.synchronousFlush = false; // this will be set to true by index.js if the page is hidden
 
   // XMLHttpRequest may not exist if we're running in a server-side rendering context
-  if (window.XMLHttpRequest) {
+  if (global.XMLHttpRequest) {
     const disableSyncFlush = options && options.disableSyncEventPost;
     ret.httpRequest = (method, url, headers, body) => {
       const syncFlush = ret.synchronousFlush & !disableSyncFlush;
       ret.synchronousFlush = false;
       return newHttpRequest(method, url, headers, body, syncFlush);
+    }
+  } else if (GLOBAL.fetch) {
+    // fetch is supported in service workers and in node v18+
+    ret.httpRequest = (method, url, headers, body) => {
+      return GLOBAL.fetch(url, {
+        method,
+        headers,
+        body
+      }).then((res) => {
+        res.text().then((text) => {
+          return {
+            status: res.status,
+            header: (key) => res.headers.get(key),
+            body: text,
+          };
+        });
+      })
     };
   }
 
@@ -21,53 +52,61 @@ export default function makeBrowserPlatform(options) {
   ret.httpAllowsPost = () => {
     // We compute this lazily because calling XMLHttpRequest() at initialization time can disrupt tests
     if (hasCors === undefined) {
-      hasCors = window.XMLHttpRequest ? 'withCredentials' in new window.XMLHttpRequest() : false;
+      if (GLOBAL.XMLHttpRequest) {
+        hasCors = GLOBAL.XMLHttpRequest && ('withCredentials' in new GLOBAL.XMLHttpRequest());
+      } else if (GLOBAL.fetch) {
+        hasCors = true;
+      }
+      
     }
     return hasCors;
   };
 
   // Image-based mechanism for sending events if POST isn't available
   ret.httpFallbackPing = (url) => {
-    const img = new window.Image();
-    img.src = url;
+    // won't exist in a server-side rendering context or in a web worker
+    if(GLOBAL.Image) {
+      const img = new GLOBAL.Image();
+      img.src = url;
+    }
   };
 
   const eventUrlTransformer = options && options.eventUrlTransformer;
-  ret.getCurrentUrl = () => (eventUrlTransformer ? eventUrlTransformer(window.location.href) : window.location.href);
+  ret.getCurrentUrl = () => (!!GLOBAL.location  ? (eventUrlTransformer ? eventUrlTransformer(GLOBAL.location.href) : GLOBAL.location.href): undefined);
 
   ret.isDoNotTrack = () => {
     let flag;
-    if (window.navigator && window.navigator.doNotTrack !== undefined) {
-      flag = window.navigator.doNotTrack; // FF, Chrome
-    } else if (window.navigator && window.navigator.msDoNotTrack !== undefined) {
-      flag = window.navigator.msDoNotTrack; // IE 9/10
+    if (GLOBAL.navigator && GLOBAL.navigator.doNotTrack !== undefined) {
+      flag = GLOBAL.navigator.doNotTrack; // FF, Chrome
+    } else if (GLOBAL.navigator && GLOBAL.navigator.msDoNotTrack !== undefined) {
+      flag = GLOBAL.navigator.msDoNotTrack; // IE 9/10
     } else {
-      flag = window.doNotTrack; // IE 11+, Safari
+      flag = GLOBAL.doNotTrack; // IE 11+, Safari
     }
     return flag === 1 || flag === true || flag === '1' || flag === 'yes';
   };
 
   try {
-    if (window.localStorage) {
+    if (GLOBAL.localStorage) {
       ret.localStorage = {
         get: (key) =>
           new Promise((resolve) => {
-            resolve(window.localStorage.getItem(key));
+            resolve(GLOBAL.localStorage.getItem(key));
           }),
         set: (key, value) =>
           new Promise((resolve) => {
-            window.localStorage.setItem(key, value);
+            GLOBAL.localStorage.setItem(key, value);
             resolve();
           }),
         clear: (key) =>
           new Promise((resolve) => {
-            window.localStorage.removeItem(key);
+            GLOBAL.localStorage.removeItem(key);
             resolve();
           }),
       };
     }
   } catch (e) {
-    // In some browsers (such as Chrome), even looking at window.localStorage at all will cause a
+    // In some browsers (such as Chrome), even looking at GLOBAL.localStorage at all will cause a
     // security error if the feature is disabled.
     ret.localStorage = null;
   }
@@ -84,19 +123,19 @@ export default function makeBrowserPlatform(options) {
   const useReport = options && options.useReport;
   if (
     useReport &&
-    typeof window.EventSourcePolyfill === 'function' &&
-    window.EventSourcePolyfill.supportedOptions &&
-    window.EventSourcePolyfill.supportedOptions.method
+    typeof GLOBAL.EventSourcePolyfill === 'function' &&
+    GLOBAL.EventSourcePolyfill.supportedOptions &&
+    GLOBAL.EventSourcePolyfill.supportedOptions.method
   ) {
     ret.eventSourceAllowsReport = true;
-    eventSourceConstructor = window.EventSourcePolyfill;
+    eventSourceConstructor = GLOBAL.EventSourcePolyfill;
   } else {
     ret.eventSourceAllowsReport = false;
-    eventSourceConstructor = window.EventSource;
+    eventSourceConstructor = GLOBAL.EventSource;
   }
 
   // If EventSource does not exist, the absence of eventSourceFactory will make us not try to open streams
-  if (window.EventSource) {
+  if (GLOBAL.EventSource) {
     const timeoutMillis = 300000; // this is only used by polyfills - see below
 
     ret.eventSourceFactory = (url, options) => {
@@ -119,7 +158,7 @@ export default function makeBrowserPlatform(options) {
     };
 
     ret.eventSourceIsActive = (es) =>
-      es.readyState === window.EventSource.OPEN || es.readyState === window.EventSource.CONNECTING;
+      es.readyState === GLOBAL.EventSource.OPEN || es.readyState === GLOBAL.EventSource.CONNECTING;
   }
 
   ret.userAgent = 'JSClient';
